@@ -1,9 +1,9 @@
 """
-streamlit_app.py - Analisis Sentimen Bahasa Indonesia
+streamlit_app.py - Analisis Sentimen Bahasa Indonesia (LSTM)
 """
 
-import os, pickle
-import joblib
+import os
+import pickle
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -85,23 +85,40 @@ hr { border-color:var(--border)!important; }
 
 MODEL_DIR = "models"
 
-@st.cache_resource(show_spinner="Memuat model...")
+@st.cache_resource(show_spinner="Memuat model LSTM...")
 def load_artifacts():
-    ml   = joblib.load(os.path.join(MODEL_DIR, "ml_model.pkl"))
-    tfidf = joblib.load(os.path.join(MODEL_DIR, "tfidf_vectorizer.pkl"))
-    with open(os.path.join(MODEL_DIR, "meta.pkl"), "rb") as f:
-        meta = pickle.load(f)
-    return ml, tfidf, meta
+    from tensorflow.keras.models import load_model
 
-def predict(text, model, tfidf):
-    clean  = preprocess(text)
-    vec    = tfidf.transform([clean])
-    # LinearSVC tidak punya predict_proba, pakai decision_function
-    if hasattr(model, "predict_proba"):
-        proba_pos = float(model.predict_proba(vec)[0][1])
+    keras_path = os.path.join(MODEL_DIR, "lstm_model.keras")
+    h5_path    = os.path.join(MODEL_DIR, "lstm_model.h5")
+
+    if os.path.exists(keras_path):
+        model = load_model(keras_path)
+    elif os.path.exists(h5_path):
+        model = load_model(h5_path)
     else:
-        score     = float(model.decision_function(vec)[0])
-        proba_pos = 1 / (1 + np.exp(-score))
+        return None, None, None
+
+    with open(os.path.join(MODEL_DIR, "tokenizer.pkl"), "rb") as f:
+        tokenizer = pickle.load(f)
+    with open(os.path.join(MODEL_DIR, "config.pkl"), "rb") as f:
+        config = pickle.load(f)
+    return model, tokenizer, config
+
+@st.cache_data
+def load_history():
+    path = os.path.join(MODEL_DIR, "training_history.pkl")
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+def predict(text, model, tokenizer, config):
+    from tensorflow.keras.preprocessing.sequence import pad_sequences
+    clean  = preprocess(text)
+    seq    = tokenizer.texts_to_sequences([clean])
+    padded = pad_sequences(seq, maxlen=config["MAX_LEN"], padding="post", truncating="post")
+    proba_pos = float(model.predict(padded, verbose=0)[0][0])
     label = "Positif" if proba_pos >= 0.5 else "Negatif"
     conf  = proba_pos if label == "Positif" else 1 - proba_pos
     return label, conf, proba_pos, clean
@@ -116,17 +133,13 @@ with st.sidebar:
     </div><hr/>
     """, unsafe_allow_html=True)
 
-    ml, tfidf, meta = load_artifacts()
+    model, tokenizer, config = load_artifacts()
 
     st.markdown("**Model Aktif**")
-    st.markdown(f"""
+    st.markdown("""
     <div class='mbox' style='text-align:left; padding:14px 16px; margin-bottom:12px'>
-      <span style='font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:1px'>Algoritma</span><br/>
-      <span style='font-weight:700; color:#818cf8'>{meta['best_model']}</span>
-    </div>
-    <div class='mbox' style='text-align:left; padding:14px 16px'>
-      <span style='font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:1px'>Test Accuracy</span><br/>
-      <span style='font-weight:800; font-size:1.4rem; color:#22d3a8'>{meta['best_accuracy']:.1%}</span>
+      <span style='font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:1px'>Arsitektur</span><br/>
+      <span style='font-weight:700; color:#818cf8'>Bidirectional LSTM</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -135,10 +148,10 @@ with st.sidebar:
     <div style='text-align:center; padding:12px; background:rgba(99,102,241,0.1);
     border:1px solid rgba(99,102,241,0.25); border-radius:10px; margin-top:8px'>
       <p style='margin:0; font-size:13px; font-weight:700; color:#818cf8'>Britney Angeline</p>
-      <p style='margin:2px 0 0 0; font-size:11px; color:#64748b; font-family:monospace'>NIM: 12345678</p>
+      <p style='margin:2px 0 0 0; font-size:11px; color:#64748b; font-family:monospace'>NIM: 2702333586</p>
     </div>
     """, unsafe_allow_html=True)
-    st.caption("v2.0.0 · TF-IDF · Streamlit")
+    st.caption("v2.0.0 · Bidirectional LSTM · Streamlit")
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -149,13 +162,13 @@ st.markdown("""
     Analisis Sentimen Bahasa Indonesia
   </h1>
   <p style='color:#64748b; font-size:15px; margin:0'>
-    Deteksi sentimen positif &amp; negatif menggunakan Machine Learning · TF-IDF + """ + meta['best_model'] + """
+    Deteksi sentimen positif &amp; negatif menggunakan Deep Learning · Bidirectional LSTM
   </p>
 </div>
 """, unsafe_allow_html=True)
 
-if not os.path.exists(os.path.join(MODEL_DIR, "ml_model.pkl")):
-    st.error("Model belum ada! Jalankan `python train.py` terlebih dahulu.")
+if model is None:
+    st.error("Model belum ada! Pastikan folder `models/` berisi `lstm_model.keras`, `tokenizer.pkl`, `config.pkl`.")
     st.stop()
 
 tab1, tab2, tab3 = st.tabs(["  🔍 Analisis Teks  ", "  📦 Analisis Batch  ", "  📊 Statistik Model  "])
@@ -199,13 +212,14 @@ with tab1:
 
     with col_out:
         if run and user_text.strip():
-            label, conf, proba_pos, clean = predict(user_text, ml, tfidf)
+            with st.spinner("Menganalisis..."):
+                label, conf, proba_pos, clean = predict(user_text, model, tokenizer, config)
             proba_neg = 1 - proba_pos
             pos_pct   = int(proba_pos * 100)
             neg_pct   = int(proba_neg * 100)
             emoji     = "😊" if label == "Positif" else "😞"
             badge     = "badge-pos" if label == "Positif" else "badge-neg"
-            bar_color = "bar-pos"   if label == "Positif" else "bar-neg"
+            conf_color = "#22d3a8" if label=="Positif" else "#f87171"
 
             st.markdown("<div class='card2'>", unsafe_allow_html=True)
             st.markdown("##### 🎯 Hasil Analisis")
@@ -228,7 +242,6 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            conf_color = "#22d3a8" if label=="Positif" else "#f87171"
             st.markdown(f"""
             <div class='mbox' style='margin-top:12px'>
               <span class='mval' style='color:{conf_color}'>{conf:.1%}</span>
@@ -275,7 +288,7 @@ with tab2:
         rows = []
         bar  = st.progress(0)
         for i, t in enumerate(texts):
-            lbl, cf, pp, _ = predict(t, ml, tfidf)
+            lbl, cf, pp, _ = predict(t, model, tokenizer, config)
             rows.append({"Teks": t, "Sentimen": lbl, "Kepercayaan": f"{cf:.1%}", "Prob. Positif": round(pp,4)})
             bar.progress((i+1)/len(texts))
         bar.empty()
@@ -295,32 +308,48 @@ with tab2:
 
 # ── Tab 3 ─────────────────────────────────────────────────────────────────────
 with tab3:
+    history = load_history()
+
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("##### 📊 Informasi & Statistik Model")
 
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: st.markdown(f"<div class='mbox'><div class='mval' style='font-size:1.2rem'>{meta['best_model'].split()[0]}</div><div class='mlbl'>Algoritma</div></div>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<div class='mbox'><div class='mval'>{meta['best_accuracy']:.1%}</div><div class='mlbl'>Akurasi</div></div>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<div class='mbox'><div class='mval'>{meta['vocab_size']:,}</div><div class='mlbl'>Vocab TF-IDF</div></div>", unsafe_allow_html=True)
-    with c4: st.markdown(f"<div class='mbox'><div class='mval'>{meta['train_size']:,}</div><div class='mlbl'>Data Train</div></div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1: st.markdown(f"<div class='mbox'><div class='mval' style='font-size:1.2rem'>BiLSTM</div><div class='mlbl'>Arsitektur</div></div>", unsafe_allow_html=True)
+    with c2: st.markdown(f"<div class='mbox'><div class='mval'>{config.get('MAX_WORDS',10000):,}</div><div class='mlbl'>Vocab Size</div></div>", unsafe_allow_html=True)
+    with c3: st.markdown(f"<div class='mbox'><div class='mval'>{config.get('MAX_LEN',50)}</div><div class='mlbl'>Max Sequence</div></div>", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    import plotly.graph_objects as go
-    models_names = list(meta["all_results"].keys())
-    models_accs  = list(meta["all_results"].values())
-    fig = go.Figure(go.Bar(
-        x=models_names, y=models_accs,
-        marker_color=["#6366f1","#22d3a8","#f87171"][:len(models_names)],
-        text=[f"{a:.1%}" for a in models_accs],
-        textposition="outside",
-    ))
-    fig.update_layout(
-        title="Perbandingan Akurasi Model",
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font_color="#94a3b8", height=350,
-        yaxis=dict(range=[0,1.1], gridcolor="rgba(99,102,241,0.1)"),
-        xaxis=dict(linecolor="rgba(99,102,241,0.2)"),
-        margin=dict(l=20,r=20,t=50,b=20),
-    )
-    st.plotly_chart(fig, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
+
+    if history:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        epochs = list(range(1, len(history["accuracy"]) + 1))
+        fig = make_subplots(rows=1, cols=2, subplot_titles=("Akurasi Training", "Loss Training"))
+        fig.add_trace(go.Scatter(x=epochs, y=history["accuracy"],     name="Train Acc",  line=dict(color="#818cf8", width=2.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=epochs, y=history["val_accuracy"], name="Val Acc",    line=dict(color="#22d3a8", width=2.5, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=epochs, y=history["loss"],         name="Train Loss", line=dict(color="#f87171", width=2.5)), row=1, col=2)
+        fig.add_trace(go.Scatter(x=epochs, y=history["val_loss"],     name="Val Loss",   line=dict(color="#fbbf24", width=2.5, dash="dot")), row=1, col=2)
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#94a3b8", height=360,
+            legend=dict(bgcolor="rgba(0,0,0,0)"),
+            margin=dict(l=20,r=20,t=50,b=20),
+        )
+        for axis in ["xaxis","yaxis","xaxis2","yaxis2"]:
+            fig.update_layout(**{axis: dict(gridcolor="rgba(99,102,241,0.1)", linecolor="rgba(99,102,241,0.2)")})
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        best_val_acc = max(history["val_accuracy"])
+        best_epoch   = history["val_accuracy"].index(best_val_acc) + 1
+        st.markdown(f"""
+        <div class='card' style='margin-top:8px; background:rgba(34,211,168,0.07); border-color:rgba(34,211,168,0.3);'>
+          <p style='margin:0; color:#94a3b8; font-size:14px'>
+            Model terbaik dicapai pada <b style='color:#22d3a8'>epoch {best_epoch}</b>
+            dengan val accuracy <b style='color:#22d3a8'>{best_val_acc:.4f}</b>
+          </p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("Training history tidak ditemukan.")
