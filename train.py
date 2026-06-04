@@ -1,63 +1,29 @@
 """
-train.py - Melatih model LSTM untuk Analisis Sentimen Bahasa Indonesia
+train.py - Melatih model Analisis Sentimen Bahasa Indonesia
 Jalankan sekali sebelum deploy: python train.py
 """
 
 import os
 import pickle
+import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, accuracy_score
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import (
-    Embedding, LSTM, Dense, Dropout, Bidirectional, GlobalMaxPooling1D
-)
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-import re
+from preprocessing import preprocess
 
-# ── Konfigurasi ───────────────────────────────────────────────────────────────
-DATA_PATH   = "data.csv"
-MODEL_DIR   = "models"
-MAX_WORDS   = 10000   # vocab size
-MAX_LEN     = 50      # panjang sequence
-EMBED_DIM   = 64
-LSTM_UNITS  = 64
-DROPOUT     = 0.3
-BATCH_SIZE  = 32
-EPOCHS      = 20
-
+MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# ── Stopwords Bahasa Indonesia (ringkas) ──────────────────────────────────────
-STOPWORDS = {
-    "yang", "dan", "di", "ke", "dari", "ini", "itu", "dengan",
-    "untuk", "pada", "adalah", "atau", "juga", "karena", "saya",
-    "aku", "kamu", "kami", "kita", "mereka", "dia", "tidak", "bisa",
-    "ada", "sudah", "akan", "bisa", "lebih", "sangat", "sekali",
-    "jadi", "kalau", "tapi", "agar", "supaya", "bagi", "oleh",
-    "lagi", "pun", "sih", "deh", "dong", "nih", "ya", "nya", "si"
-}
-
-# ── Preprocessing ─────────────────────────────────────────────────────────────
-def preprocess(text: str) -> str:
-    text = str(text).lower()
-    text = re.sub(r"http\S+|www\S+", " ", text)
-    text = re.sub(r"@\w+|#\w+", " ", text)
-    text = re.sub(r"[^a-z\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    tokens = [t for t in text.split() if t not in STOPWORDS and len(t) > 2]
-    return " ".join(tokens)
-
-
-# ── Load data ─────────────────────────────────────────────────────────────────
 print("Memuat data...")
-df = pd.read_csv(DATA_PATH)
-print(f"  Total baris  : {len(df)}")
-print(f"  Distribusi   :\n{df['label'].value_counts()}")
+df = pd.read_csv("data.csv")
+print(f"Total baris  : {len(df)}")
+print(f"Distribusi   :\n{df['label'].value_counts()}\n")
 
 df["clean"] = df["text"].apply(preprocess)
 
@@ -67,94 +33,58 @@ y = df["label"].values
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.15, random_state=42, stratify=y
 )
-print(f"  Train: {len(X_train)}  |  Test: {len(X_test)}")
+print(f"Train: {len(X_train)}  |  Test: {len(X_test)}\n")
 
-# ── Tokenizer ─────────────────────────────────────────────────────────────────
-print("\nMembangun tokenizer...")
-tokenizer = Tokenizer(num_words=MAX_WORDS, oov_token="<OOV>")
-tokenizer.fit_on_texts(X_train)
-
-X_train_seq = pad_sequences(
-    tokenizer.texts_to_sequences(X_train),
-    maxlen=MAX_LEN, padding="post", truncating="post"
-)
-X_test_seq = pad_sequences(
-    tokenizer.texts_to_sequences(X_test),
-    maxlen=MAX_LEN, padding="post", truncating="post"
+# TF-IDF
+tfidf = TfidfVectorizer(
+    max_features=15000,
+    ngram_range=(1, 2),
+    sublinear_tf=True,
+    min_df=2,
 )
 
-# ── Build Model LSTM ──────────────────────────────────────────────────────────
-print("\nMembangun model LSTM...")
-model = Sequential([
-    Embedding(MAX_WORDS, EMBED_DIM, input_length=MAX_LEN),
-    Bidirectional(LSTM(LSTM_UNITS, return_sequences=True)),
-    Dropout(DROPOUT),
-    GlobalMaxPooling1D(),
-    Dense(64, activation="relu"),
-    Dropout(DROPOUT),
-    Dense(1, activation="sigmoid")
-])
-
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-    loss="binary_crossentropy",
-    metrics=["accuracy"]
-)
-model.summary()
-
-# ── Train ─────────────────────────────────────────────────────────────────────
-callbacks = [
-    EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5),
-]
-
-print("\nMelatih model...")
-history = model.fit(
-    X_train_seq, y_train,
-    epochs=EPOCHS,
-    batch_size=BATCH_SIZE,
-    validation_split=0.15,
-    callbacks=callbacks,
-    verbose=1
-)
-
-# ── Evaluasi ──────────────────────────────────────────────────────────────────
-print("\nEvaluasi pada data test...")
-y_pred_proba = model.predict(X_test_seq, verbose=0).flatten()
-y_pred = (y_pred_proba >= 0.5).astype(int)
-
-print(f"Akurasi: {accuracy_score(y_test, y_pred):.4f}")
-print(classification_report(y_test, y_pred, target_names=["Negatif", "Positif"]))
-
-# ── Simpan artifact ───────────────────────────────────────────────────────────
-print("\nMenyimpan model dan tokenizer...")
-
-# Simpan model LSTM
-model.save(os.path.join(MODEL_DIR, "lstm_model.keras"))
-
-# Simpan tokenizer + config
-config = {
-    "MAX_LEN"   : MAX_LEN,
-    "MAX_WORDS" : MAX_WORDS,
-    "EMBED_DIM" : EMBED_DIM,
+# Coba 3 model, pilih yang terbaik
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, C=1.0, random_state=42),
+    "Linear SVC"         : LinearSVC(max_iter=2000, C=1.0, random_state=42),
+    "Naive Bayes"        : MultinomialNB(alpha=0.1),
 }
-with open(os.path.join(MODEL_DIR, "tokenizer.pkl"), "wb") as f:
-    pickle.dump(tokenizer, f)
-with open(os.path.join(MODEL_DIR, "config.pkl"), "wb") as f:
-    pickle.dump(config, f)
 
-# Simpan history untuk visualisasi di Streamlit
-history_data = {
-    "accuracy"    : history.history.get("accuracy", []),
-    "val_accuracy": history.history.get("val_accuracy", []),
-    "loss"        : history.history.get("loss", []),
-    "val_loss"    : history.history.get("val_loss", []),
+X_train_tfidf = tfidf.fit_transform(X_train)
+X_test_tfidf  = tfidf.transform(X_test)
+
+best_name  = ""
+best_acc   = 0
+best_model = None
+results    = {}
+
+for name, clf in models.items():
+    clf.fit(X_train_tfidf, y_train)
+    acc = accuracy_score(y_test, clf.predict(X_test_tfidf))
+    results[name] = round(acc, 4)
+    print(f"{name}: {acc:.4f}")
+    if acc > best_acc:
+        best_acc   = acc
+        best_name  = name
+        best_model = clf
+
+print(f"\nModel terbaik: {best_name} ({best_acc:.4f})")
+print(classification_report(y_test, best_model.predict(X_test_tfidf),
+                            target_names=["Negatif", "Positif"]))
+
+# Simpan
+joblib.dump(best_model, os.path.join(MODEL_DIR, "ml_model.pkl"))
+joblib.dump(tfidf,      os.path.join(MODEL_DIR, "tfidf_vectorizer.pkl"))
+
+meta = {
+    "best_model"   : best_name,
+    "best_accuracy": best_acc,
+    "all_results"  : results,
+    "train_size"   : len(X_train),
+    "test_size"    : len(X_test),
+    "vocab_size"   : len(tfidf.vocabulary_),
 }
-with open(os.path.join(MODEL_DIR, "training_history.pkl"), "wb") as f:
-    pickle.dump(history_data, f)
+with open(os.path.join(MODEL_DIR, "meta.pkl"), "wb") as f:
+    pickle.dump(meta, f)
 
-print("Selesai! File tersimpan di folder 'models/':")
-print("  - models/lstm_model.keras")
-print("  - models/tokenizer.pkl")
-print("  - models/config.pkl")
-print("  - models/training_history.pkl")
+print("\nSelesai! File tersimpan di folder models/")
