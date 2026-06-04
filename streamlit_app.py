@@ -274,7 +274,15 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("<hr/>", unsafe_allow_html=True)
-    st.caption("v2.0.0 · LSTM · Streamlit")
+    st.markdown("""
+    <div style='text-align:center; padding:12px; background:rgba(99,102,241,0.1); 
+    border:1px solid rgba(99,102,241,0.25); border-radius:10px; margin-top:8px'>
+      <p style='margin:0; font-size:13px; font-weight:700; color:#818cf8'>Britney Angeline</p>
+      <p style='margin:2px 0 0 0; font-size:11px; color:#64748b; font-family:monospace'>NIM: 2702333586</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.caption("v2.0.0 · LSTM · Streamlit")
 
 
 # ── Main content ──────────────────────────────────────────────────────────────
